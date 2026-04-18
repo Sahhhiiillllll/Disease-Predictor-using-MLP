@@ -198,15 +198,26 @@ html, body,
     font-size: 0.84rem !important;
     color: var(--txt) !important;
 }
-[data-testid="stSelectbox"] > div > div {
+[data-testid="stSelectbox"] > div > div,
+[data-testid="stSelectbox"] [data-baseweb="select"] > div {
     background: #f0f7ff !important;
     border: 1.5px solid rgba(74,144,226,0.22) !important;
     border-radius: 10px !important;
     transition: border-color 0.2s, box-shadow 0.2s !important;
 }
-[data-testid="stSelectbox"] > div > div:focus-within {
+[data-testid="stSelectbox"] > div > div:focus-within,
+[data-testid="stSelectbox"] [data-baseweb="select"] > div:focus-within {
     border-color: var(--blue) !important;
     box-shadow: 0 0 0 3px rgba(74,144,226,0.12) !important;
+}
+[data-testid="stSelectbox"] [data-baseweb="select"] span,
+[data-testid="stSelectbox"] [data-baseweb="select"] input,
+[data-testid="stSelectbox"] [data-baseweb="select"] div {
+    color: var(--txt) !important;
+    opacity: 1 !important;
+}
+[data-baseweb="popover"] [role="option"] {
+    color: var(--txt) !important;
 }
 
 /* ── PRIMARY BUTTON ── */
@@ -530,7 +541,6 @@ col1, col2 = st.columns([1, 1], gap="large")
 # LEFT — symptom selection
 # ═══════════════════════════════════
 with col1:
-    st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown('<div class="slabel">📋 Step 1</div>', unsafe_allow_html=True)
     st.markdown('<div class="stitle">Select Patient Symptoms</div>', unsafe_allow_html=True)
 
@@ -613,8 +623,6 @@ with col1:
             unsafe_allow_html=True,
         )
 
-    st.markdown("</div>", unsafe_allow_html=True)  # /card
-
     # Health tips
     tips_rows = "".join(
         f'<div class="tip-row"><span class="tip-ico">{ico}</span><span>{tip}</span></div>'
@@ -629,7 +637,6 @@ with col1:
 # RIGHT — prediction output
 # ═══════════════════════════════════
 with col2:
-    st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown('<div class="slabel">📊 Step 2 &amp; 3</div>', unsafe_allow_html=True)
     st.markdown('<div class="stitle">Prediction &amp; Analysis</div>', unsafe_allow_html=True)
 
@@ -791,8 +798,6 @@ with col2:
             "Click <strong>🔍 Predict Disease</strong> to generate results.</p>",
             unsafe_allow_html=True,
         )
-
-    st.markdown("</div>", unsafe_allow_html=True)  # /card
 
 # ── DISCLAIMER ────────────────────────────────────────────────────────────────
 st.markdown(
