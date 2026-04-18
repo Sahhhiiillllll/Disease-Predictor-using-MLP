@@ -8,13 +8,24 @@ Streamlit Cloud-ready version
 """
 
 import random
+import os
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+
+# Reduce TensorFlow/absl noise in Streamlit reruns.
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "-1")
+
+import tensorflow as tf
+from tensorflow.keras import Sequential
+from tensorflow.keras.layers import Dense, Dropout
 from tensorflow.keras.models import load_model
+
+tf.get_logger().setLevel("ERROR")
 
 # ── PAGE CONFIG  (must be the very first Streamlit call) ──────────────────────
 st.set_page_config(
@@ -311,25 +322,6 @@ html, body,
 """
 st.markdown(GLOBAL_CSS, unsafe_allow_html=True)
 
-# ── MODEL LOADING ─────────────────────────────────────────────────────────────
-MODEL_CANDIDATES = [Path("disease_model.h5"), Path("resources/mlp_model.h5")]
-model = None
-for mp in MODEL_CANDIDATES:
-    if mp.exists():
-        try:
-            model = load_model(str(mp))
-            break
-        except Exception as exc:
-            st.error(f"Model file found but failed to load ({mp}): {exc}")
-            st.stop()
-
-if model is None:
-    st.error(
-        "No trained model found. Place 'disease_model.h5' in the project root "
-        "or 'resources/mlp_model.h5'."
-    )
-    st.stop()
-
 # ── DATASET LOADING ───────────────────────────────────────────────────────────
 try:
     df = pd.read_csv("resources/dataset_kaggle.csv")
@@ -384,9 +376,111 @@ HEALTH_TIPS = [
 
 BAR_COLORS = ["#4A90E2", "#2ECC71", "#f39c12", "#e74c3c", "#9b59b6"]
 
+
+def _normalize_text(text: str) -> str:
+    return text.replace("’", "'").strip()
+
+
+def train_and_save_model(output_path: Path | None = None):
+    train_df = pd.read_csv("resources/dataset_kaggle.csv")
+    symptom_cols = [c for c in train_df.columns if c.startswith("Symptom_")]
+
+    symptom_index = {_normalize_text(s): i for i, s in enumerate(SYMPTOMS)}
+    diseases = sorted(train_df["Disease"].unique())
+    disease_to_index = {d: i for i, d in enumerate(diseases)}
+
+    x = np.zeros((len(train_df), len(SYMPTOMS)), dtype=np.float32)
+    y = np.zeros((len(train_df),), dtype=np.int32)
+
+    for row_i, (_, row) in enumerate(train_df.iterrows()):
+        for col in symptom_cols:
+            sym = _normalize_text(str(row[col]))
+            if sym in symptom_index:
+                x[row_i, symptom_index[sym]] = 1.0
+        y[row_i] = disease_to_index[row["Disease"]]
+
+    y_cat = tf.keras.utils.to_categorical(y, num_classes=len(diseases))
+
+    model = Sequential(
+        [
+            Dense(256, activation="relu", input_shape=(len(SYMPTOMS),)),
+            Dropout(0.25),
+            Dense(128, activation="relu"),
+            Dropout(0.2),
+            Dense(len(diseases), activation="softmax"),
+        ]
+    )
+    model.compile(
+        optimizer="adam",
+        loss="categorical_crossentropy",
+        metrics=["accuracy"],
+    )
+    history = model.fit(
+        x,
+        y_cat,
+        epochs=30,
+        batch_size=32,
+        validation_split=0.1,
+        verbose=0,
+    )
+
+    if output_path is None:
+        output_path = Path("resources/mlp_model.h5")
+    model.save(str(output_path))
+    metrics = {
+        "train_accuracy": float(history.history["accuracy"][-1]),
+        "val_accuracy": float(history.history["val_accuracy"][-1]),
+        "train_loss": float(history.history["loss"][-1]),
+        "val_loss": float(history.history["val_loss"][-1]),
+    }
+    return output_path, metrics
+
+
+@st.cache_resource(show_spinner=False)
+def load_model_cached(model_path: str, model_mtime: float):
+    _ = model_mtime  # included in cache key to invalidate stale loads
+    return load_model(model_path, compile=False)
+
+
+def resolve_model_path() -> tuple[Path, bool]:
+    model_candidates = [Path("disease_model.h5"), Path("resources/mlp_model.h5")]
+    for model_path in model_candidates:
+        if model_path.exists():
+            return model_path, False
+
+    trained_path, trained_metrics = train_and_save_model(Path("resources/mlp_model.h5"))
+    st.session_state.last_train_metrics = trained_metrics
+    return trained_path, True
+
+
+try:
+    active_model_path, model_was_trained = resolve_model_path()
+except Exception as exc:
+    st.error(f"Model could not be loaded or trained: {exc}")
+    st.stop()
+
+if model_was_trained:
+    st.success(f"No pretrained model found. Trained a new model at: {active_model_path}")
+
 # ── SESSION STATE ─────────────────────────────────────────────────────────────
 if "selected_symptoms" not in st.session_state:
     st.session_state.selected_symptoms = ["Please Select"] * 5
+if "active_model_path" not in st.session_state:
+    st.session_state.active_model_path = str(active_model_path)
+if "retrain_status" not in st.session_state:
+    st.session_state.retrain_status = ""
+if "last_train_metrics" not in st.session_state:
+    st.session_state.last_train_metrics = None
+
+if active_model_path.exists():
+    current_model_path = Path(st.session_state.active_model_path)
+    if not current_model_path.exists():
+        current_model_path = active_model_path
+        st.session_state.active_model_path = str(active_model_path)
+    model = load_model_cached(str(current_model_path), current_model_path.stat().st_mtime)
+else:
+    st.error("Model file is missing after setup. Please re-train the model.")
+    st.stop()
 
 # ── HEADER ────────────────────────────────────────────────────────────────────
 st.markdown("""
@@ -487,6 +581,38 @@ with col1:
         key="predict_btn",
     )
 
+    if st.button("🧠  Train / Re-train Model", key="retrain_btn"):
+        with st.spinner("Training model... this may take around 20-60 seconds."):
+            try:
+                trained_path, trained_metrics = train_and_save_model(Path("resources/mlp_model.h5"))
+                st.session_state.active_model_path = str(trained_path)
+                st.session_state.last_train_metrics = trained_metrics
+                st.session_state.retrain_status = f"Model re-trained successfully: {trained_path}"
+                st.rerun()
+            except Exception as exc:
+                st.session_state.retrain_status = f"Model training failed: {exc}"
+
+    if st.session_state.retrain_status:
+        if st.session_state.retrain_status.startswith("Model re-trained successfully"):
+            st.success(st.session_state.retrain_status)
+        else:
+            st.error(st.session_state.retrain_status)
+
+    if st.session_state.last_train_metrics:
+        m = st.session_state.last_train_metrics
+        st.markdown(
+            f"""
+            <div class="warn-hint" style="background:rgba(46,204,113,0.1);border-left-color:#2ECC71;color:#1e6b43;">
+              <strong>📈 Latest Training Metrics</strong><br/>
+              Train Accuracy: <strong>{m["train_accuracy"] * 100:.2f}%</strong> |
+              Validation Accuracy: <strong>{m["val_accuracy"] * 100:.2f}%</strong><br/>
+              Train Loss: <strong>{m["train_loss"]:.4f}</strong> |
+              Validation Loss: <strong>{m["val_loss"]:.4f}</strong>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
     st.markdown("</div>", unsafe_allow_html=True)  # /card
 
     # Health tips
@@ -537,10 +663,11 @@ with col2:
                 if s in SYMPTOMS:
                     encoded[SYMPTOMS.index(s)] = 1
 
-            inp = np.zeros((1, 676))
-            inp[0, : len(encoded)] = encoded
+            input_dim = int(model.input_shape[-1])
+            inp = np.zeros((1, input_dim))
+            inp[0, : min(len(encoded), input_dim)] = encoded[:input_dim]
 
-            predictions = model.predict(inp)
+            predictions = model.predict(inp, verbose=0)
 
             # Match-score boosts (identical to original logic)
             scores = {}
